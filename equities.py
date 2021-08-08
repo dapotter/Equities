@@ -3,6 +3,7 @@ import datetime as dt
 import numpy as np
 import matplotlib.pyplot as plt
 import statsmodels.formula.api as smf
+import statsmodels.tsa.stattools as smt
 import seaborn as sns
 import scipy.fftpack
 from scipy.optimize import curve_fit
@@ -15,10 +16,22 @@ def dji_fft():
 	df.Date = pd.to_datetime(df.Date)
 	df.set_index('Date', inplace=True)
 	print('df:\n', df)
+
+	# Plot the entire Dow Jones 1914 - 2021
 	fig, ax = plt.subplots(1,1, figsize=(6,6))
 	df.plot(use_index=True, y='Close', ax=ax)
 	ax.set_xlabel('Date')
 	ax.set_ylabel('Closing Price')
+	plt.show()
+
+	# Plot the DJI over yearly, monthly and weekly timescales
+	fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(1,5, figsize=(18,4))
+	df.plot(use_index=True, y='Close', ax=ax1)
+	df.loc['1950-01-01':'2000-01-01', :].plot(use_index=True, y='Close', ax=ax2)
+	df.loc['1970-01-01':'1980-01-01', :].plot(use_index=True, y='Close', ax=ax3)
+	df.loc['1974-01-01':'1976-01-01', :].plot(use_index=True, y='Close', ax=ax4)
+	df.loc['1975-01-01':'1975-02-01', :].plot(use_index=True, y='Close', ax=ax5)
+	plt.savefig('DJI_Fractal.png', bbox_inches='tight')
 	plt.show()
 
 	close = df['Close']
@@ -100,7 +113,8 @@ def dji_fft():
 	df.sort_values(by='Rel Change', ascending=True, inplace=True)
 	print('Relative Price Fluctuations:\n', df.head(20))
 
-	price_fluc = df['Change']
+	price_fluc = df['Rel Change']
+	print('price fluctuations:\n', price_fluc)
 	fig, ax = plt.subplots(1,1, figsize=(6,6))
 	price_fluc.hist(bins=50, ax=ax)
 	ax.set_xlabel('abs(Daily Change), Points')
@@ -108,6 +122,39 @@ def dji_fft():
 	ax.set_xscale('log')
 	ax.set_yscale('log')
 	plt.show()
+
+	fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(1,5, figsize=(18,4))
+	price_fluc.plot(y='Close', ax=ax1)
+	price_fluc.loc['1950-01-01':'2000-01-01'].plot(ax=ax2)
+	price_fluc.loc['1970-01-01':'1980-01-01'].plot(ax=ax3)
+	price_fluc.loc['1974-01-01':'1976-01-01'].plot(ax=ax4)
+	price_fluc.loc['1975-01-01':'1975-02-01'].plot(ax=ax5)
+	plt.savefig('DJI_Fluc.png', bbox_inches='tight')
+	plt.show()
+
+	# spacing = np.linspace(-5 * np.pi, 5 * np.pi, num=100)
+	# s = pd.Series(0.7 * np.random.rand(100) + 0.3 * np.sin(spacing))
+	# print('s:\n', s)
+	# x = pd.plotting.autocorrelation_plot(s)
+	# x.plot()
+	# plt.show()
+
+	s = price_fluc.sort_index(ascending=True)
+	s.reset_index(drop=True, inplace=True)
+	s = s.loc[1:]
+	s.plot(use_index=True)
+	plt.show()
+	print('price_fluc sorted ascending by Date:\n', s)
+	x = pd.plotting.autocorrelation_plot(s)
+	x.plot()
+	plt.savefig('DJI_Diff_ACF.png', bbox_inches='tight')
+	plt.show()
+
+	# Random signal generation:
+	noise = np.random.normal(0,1,100)
+	# Not sure if I want to do this.
+
+
 
 	# Plotting change and change relative to the day's closing price.
 	# This is needed because as the Dow climbs higher its fluctuations
