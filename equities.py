@@ -178,4 +178,26 @@ def dji_fft():
 	plt.show()
 
 
-dji_fft()
+# dji_fft()
+
+# Playing with floating point precision
+x = [62888.650808, 62888.650808, 62888.650808]
+s = pd.Series(data=x)
+y = s.astype('float')
+print('y =\n', y)
+y = s.astype('float32')
+print('y =\n', y)
+y = s.astype('float16')
+print('y =\n', y)
+y = s.round(2)
+print('y =\n', y)
+
+print(131.5*10*1E6/(1E9))
+
+values = np.random.uniform(low=-10, high=15, size=1000)
+plt.plot(values)
+plt.show()
+plt.hist(values)
+plt.show()
+
+
