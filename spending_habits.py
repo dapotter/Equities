@@ -1496,11 +1496,15 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 	### Calculate original return and cumulative percent change: ###
 	# Note: This is used later on to calculate trajectories:
 	start_date = '1914-12-12' # '1985-01-29'
-	last_date = '2021-07-16' # '2019-12-13'
+	end_date = '2021-07-16' # '2019-12-13'
+	
+	start_balance = 6000
+	# Calculate the full trajectory for the $6000.
 	cumulative_pct_change = df_dji / df_dji.loc[start_date]
 	cumulative_pct_change = cumulative_pct_change.squeeze() # Converting to a Series. Also works: cumulative_pct_change['Close']
-	investments = pd.Series(data=[6000]*len(cumulative_pct_change), index=cumulative_pct_change.index)
+	investments = pd.Series(data=[start_balance]*len(cumulative_pct_change), index=cumulative_pct_change.index)
 	original_balance = cumulative_pct_change.multiply(investments)
+	df_original_balance = original_balance.to_frame(name='original_balance') # Only used to join to all of the other trajectories after the simulations are completed
 	original_return = original_balance.iloc[-1]
 
 	### Specify maximums: ###
@@ -1524,13 +1528,15 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 	df_dji.index = pd.to_datetime(df_dji.index)
 	first_date = np.datetime64(df_dji.index[0]) # Need to make np.datetime64, otherwise they'll be pandas Timestamp.
 	last_date = np.datetime64(df_dji.index[-1])
-	traj_list = []
+	second_to_last_date = np.datetime64(df_dji.index[-2]) # This is required because in the last buy transaction, there needs to be a day available after the buy transaction to store the new balance.
 	parameters_list = []
 	sell_dates_list = []
 	buy_dates_list = []
+	# df_traj_thin = pd.DataFrame(data=[], index=original_balance.index) # Using all the index values seems to take up a ton of memory.
+	df_traj_thin = pd.DataFrame([])
 	print('Running {} simulations...'.format(total_sims_to_run))
 	for n in range(total_sims_to_run):
-		pct_complete = n/total_sims_to_run*100
+		pct_complete = (n+1)/total_sims_to_run*100
 		print('Percentage complete: {:.1f}%'.format(pct_complete))
 	
 		# Parameters:
@@ -1564,6 +1570,7 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 		dates = []
 		sell_dates = []
 		buy_dates = []
+		sell_buy_dates = []
 		date = first_date
 		### Assembling sell-buy dates list: ###
 		for i in range(len(transaction_conditions_met)):
@@ -1582,11 +1589,11 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 						date = new_dates.loc[new_dates.Close <= sell_pct_change].index.values[0] # Look through those dates for the soonest occurrence of achieving a sell_pct_change for sell_wait_days period.
 						dates.append(date)
 						sell_dates.append(date)
-					else:
-						print('Sell not triggered')
+					# else:
+					# 	print('Sell not triggered')
 				except:
-					# print('Sell date is out of bounds, not storing it.')
-					break # Don't select a sell date if the proposed date doesn't exist because the last date was a buy				
+					# print('Sell date goes beyond last date of DJI, not storing it.')
+					break # Don't select a sell date if the proposed date doesn't exist. The last date was a buy and that's all that matters			
 			else: # ...otherwise find the buy date
 				# td = dt.timedelta(days=buy_wait_days)
 				td = pd.Timedelta(value=buy_wait_days, unit='days')
@@ -1601,15 +1608,22 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 						date = new_dates.loc[new_dates.Close >= buy_pct_change].index.values[0] # Get first date
 						dates.append(date)
 						buy_dates.append(date)
-					else:
-						print('Buy not triggered')
+					# else:
+					# 	print('Buy not triggered')
 				except:
-					# print('Buy date is out of bounds, setting the buy date as the last date in the DJI.')
-					# print('Buy date =', last_date)
-					dates.append(last_date)
-					buy_dates.append(last_date)
+					# print('Buy date goes beyond last date of DJI. Setting the buy date as the day before the last date in the DJI.')
+					# Sometimes this gets triggered when the sell date is 2021-07-16 (last date of DJI), and thus 
+					# creates a buy date of 2021-07-15 (second to laste date of DJI), which means a buy date precedes its corresponding
+					# sell date. This is dealt with below in the trajectory calculation section.
+					dates.append(second_to_last_date)
+					buy_dates.append(second_to_last_date)
 					break
 
+		sell_buy_dates = [[x, y] for x, y in zip(sell_dates, buy_dates)]
+		# print('sell_dates:\n', sell_dates)
+		# print('buy_dates:\n', buy_dates)
+		# print('sell_buy_dates:\n', sell_buy_dates)
+		
 		# Converting to lists of timestamps.
 		# Note: Above I need to avoid numpy datetime64
 		dates = pd.to_datetime(dates).to_list()
@@ -1621,129 +1635,154 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 		# If the sell dates or buy dates don't exist because conditions weren't met to invoke a transaction,
 		# then store the parameters that caused that along with a final return of NaN
 		# Else, run everything below including the for loop that calculates the trajectory.
+		df_single_traj_thin = pd.DataFrame([])
+		traj_thin_list = [] # For storing the balance only on the transaction dates and no data between the transactions
 		if len(dates) == 0:
 			print('Outer if: sell_dates or buy_dates is empty')
-			traj_list.append(original_balance.values)
+			traj_thin_list.append([[start_date, original_balance.iloc[0]], [last_date, original_return]])
 			parameters_list.append([sell_wait_days, sell_pct_change, sell_portfolio_pct, buy_wait_days, buy_pct_change, original_return])
 			sell_dates_list.append([np.nan])
 			buy_dates_list.append([np.nan])
+
+		# Check if last sell or buy date is the last date of the DJI and the lists are exactly one date long. If so, delete last date and append to relevant lists:
+		elif (sell_dates[-1] == last_date) or (sell_dates[-1] == second_to_last_date) and (len(sell_dates) == 1):
+			print('Sell dates problem and len(sell_dates) == 1: Trimming sell and buy dates:\n')
+			sell_dates = sell_dates[0:-1]
+			buy_dates = buy_dates[0:-1]
+			traj_thin_list.append([[start_date, original_balance.iloc[0]], [last_date, original_return]])
+			parameters_list.append([sell_wait_days, sell_pct_change, sell_portfolio_pct, buy_wait_days, buy_pct_change, original_return])
+			sell_dates_list.append([np.nan])
+			buy_dates_list.append([np.nan])
+		elif buy_dates[-1] == last_date and (len(sell_dates) == 1):
+			print('Buy dates problem and len(buy_dates) == 1: Trimming sell and buy dates:\n')
+			sell_dates = sell_dates[0:-1]
+			buy_dates = buy_dates[0:-1]
+			traj_thin_list.append([[start_date, original_balance.iloc[0]], [last_date, original_return]])
+			parameters_list.append([sell_wait_days, sell_pct_change, sell_portfolio_pct, buy_wait_days, buy_pct_change, original_return])
+			sell_dates_list.append([np.nan])
+			buy_dates_list.append([np.nan])
+
+		# Check if last sell or buy date is the last date of the DJI and the lists are more than one date long. If so, delete last date:
+		elif (sell_dates[-1] == last_date) or (sell_dates[-1] == second_to_last_date) and (len(sell_dates) > 1):
+			print('Sell dates problem: Trimming sell and buy dates:\n')
+			sell_dates = sell_dates[0:-1]
+			buy_dates = buy_dates[0:-1]
+		elif buy_dates[-1] == last_date and (len(sell_dates) > 1):
+			print('Buy dates problem: Trimming sell and buy dates:\n')
+			sell_dates = sell_dates[0:-1]
+			buy_dates = buy_dates[0:-1]	
+
+
+		### Attempting a new way of calculating trajectories faster: ###
 		else:
-			# Necessary to sort to maintain chronological order after the set operation.
-			# Now that we have a master list of sell and buy dates, write them to sell_dates
-			# and buy_dates. sell_dates and buy_dates originally started out with many dates,
-			# some identical to each other. Then they were selected so every sell was followed
-			# by a buy, then the paired down list is written over sell_dates and buy_dates below.
-
-			# Restore the balance for the next iteration:
-			balance = original_balance
-
-			# Go through the buy and sell dates, compute the original investment required to achieve the buys and sells balance, then
-			# update the investments array to update the balance array. Do this for each sell-buy combination, then finally calculate
-			# the final balance using the last computed original_investment, to get the final return on the portfolio.
-			return_list = [original_return] # Initiate the list with the first final return
-			final_return_list = []
-			sell_date = sell_dates[0]
-			adj_sell_date = sell_dates[0]-dt.timedelta(days=1)
-			# print('Is adj_sell_date in balance index? ', balance.index.contains(adj_sell_date))		
-			# print('sim # {}, start_date:adj_sell_date = {}:{}'.format(n, start_date, adj_sell_date))
-			trajectory = pd.Series(data=balance.loc[start_date:adj_sell_date])
-			for i in range(len(sell_dates)):
-				# Separately calculating the sell information for creating a trajectory
-				sell_amount = balance.loc[sell_dates[i]]*sell_portfolio_pct # $100 * 0.1 = $10
-				sell_investment = ((balance.loc[sell_dates[i]] - sell_amount) / cumulative_pct_change.loc[sell_dates[i]]) # ($100 - $10) / 0.1 = $900
-				sell_investments = pd.Series(data=[sell_investment]*len(cumulative_pct_change), index=cumulative_pct_change.index) # [900, 900, ..., 900]
-				sell_balance = cumulative_pct_change.multiply(sell_investments) # [cpc_1*900, cpc_2*900, ..., 0.1*900=90, ..., cpc_n*900]
-				# Update the traj with the first sell:
-				trajectory = pd.concat((trajectory, sell_balance.loc[sell_dates[i]:buy_dates[i]-dt.timedelta(days=1)]), axis=0)
-				# For now let's assume that we use 100% of what's sold to buy back into the market. This is
-				# a decent strategy because saving money for the future is almost never a good idea.
-				buy_amount = sell_amount
-
-				# Calculate the original investment required to achieve a certain balance
-				original_investment = ((balance.loc[sell_dates[i]] - sell_amount) / cumulative_pct_change.loc[sell_dates[i]]) + (buy_amount / cumulative_pct_change.loc[buy_dates[i]])
-
-				# Using original_investment, recalculate the entire balance array:
-				investments = pd.Series(data=[original_investment]*len(cumulative_pct_change), index=cumulative_pct_change.index)
-				balance = cumulative_pct_change.multiply(investments)
-				return_list.append(balance.iloc[-1])
-				# Update balance with next sell_date. I don't think this is needed
-				# balance = original_investment * cumulative_pct_change.loc[sell_dates[i+1]] # next sell date
-				# If we're not on the last sell date, then create the trajectory that goes from the buy date
-				# to the next sell date. If we are on the last sell date, 
-				if i+1 < len(sell_dates):
-					trajectory = pd.concat((trajectory, balance.loc[buy_dates[i]:sell_dates[i+1]-dt.timedelta(days=1)]), axis=0)
-
-				# Math behind the original_investment equation above:
-				# new_balance = (original_investment * cumulative_pct_change.loc[buy_date]) + buy_amount
-				# original_investment = new_balance / cumulative_pct_change.loc[buy_date]
-				# Plugging new_balance into the original_investment equation:
-				# original_investment += (buy_amount / cumulative_pct_change.loc[buy_date])
-			trajectory = pd.concat((trajectory, balance.loc[buy_dates[i]:]), axis=0)
-			traj_list.append(trajectory.values)
+			traj_thin_list.append([start_date, original_balance.iloc[0]])
 			
-			final_balance = balance
-			final_return = original_investment * cumulative_pct_change.iloc[-1]
-			# print('original_investment:\n', original_investment)
-			# print('cumulative_pct_change.iloc[-1]:\n', cumulative_pct_change.iloc[-1])
+			adjustment_factor = 1
+			# This for loop computes one trajectory:
+			n_sell_buy_transactions = len(sell_dates)
+			for i, sell_date, buy_date in zip(range(n_sell_buy_transactions), sell_dates, buy_dates):
+				# Calculate sell transaction amount and balance after the sell:
+				sell_balance = original_balance.loc[sell_date] * adjustment_factor # The balance on the sell date but before the sell occurs. Not to be confused with the balance the day before the sell.
+				after_sell_balance = sell_balance * (1 - sell_portfolio_pct)
+				after_sell_dates_list = original_balance.loc[sell_date:].index.values # Get all index values on and after the sell date so I can select the date one day after the sell date on the next line.
+				# In the rare instance in which sell_dates has a sell transaction occur on the last date in the DJI (2021-07-16), then
+				# this 
+				try:
+					after_sell_date = pd.Timestamp(after_sell_dates_list[1]) # Need this date for storing the after sell balance the following day. I can't do sell_date + dt.timedelta(days=1) because this might be a weekend date, which doesn't exist.
+				except:
+					print('after_sell_dates_list:\n', after_sell_dates_list)
+					print('sell_dates:\n', sell_dates)
+				sell_amount = sell_balance - after_sell_balance # Same amount as what's used in buy transaction.
+				buy_amount = sell_amount
+				traj_thin_list.append([sell_date, sell_balance])
+				traj_thin_list.append([after_sell_date, after_sell_balance])
+				# Calculate buy transaction amount and balance after the buy:
+				buy_balance = original_balance.loc[buy_date] * (1 - sell_portfolio_pct) # The buy value is the value before the buy, and it's still 1 - sell_portfolio_pct of the balance on that date.
+				after_buy_balance = buy_balance + buy_amount
+				after_buy_dates_list = original_balance.loc[buy_date:].index.values # Get all index values on and after the buy_date so I can select the date one day after the buy date on the next line.
+				try:
+					after_buy_date = pd.Timestamp(after_buy_dates_list[1]) # Need this date for storing the after buy balance the following day. I can't do buy_date + dt.timedelta(days=1) because this might be a weekend date, which doesn't exist.
+				except:
+					print('after_buy_dates_list:\n', after_buy_dates_list)
+					print('buy_dates:\n', buy_dates)
+				traj_thin_list.append([buy_date, buy_balance])
+				traj_thin_list.append([after_buy_date, after_buy_balance])
+				# print('traj_thin_list after {}/{} sell-buy transactions:\n{}'.format(i+1, n_sell_buy_transactions, traj_thin_list))
+				# print('buy_date:\n', buy_date)
+				# print('buy_dates[-1]:\n', buy_dates[-1])
+				# Calculate adjustment factor so that the next loop iteration's sell_balance is correct.
+				# The sell_balance can't be the balance on that date but instead must be the buy_balance's
+				# percentage of the balance on the after_buy_date. If the after_buy_balance was 80% of the
+				# balance on after_buy_date, then the next iteration's sell_balance will be 80% of the
+				# balance on the sell_date.
+				adjustment_factor = after_buy_balance / original_balance.loc[after_buy_date]
+				# print('adjustment_factor =', adjustment_factor)
+				# Put the traj_thin_list into a dataframe with an index, then concatenate to df_traj_thin
+				# which has all dates from original_balance in its index
+			
+			# Calculate final return for the trajectory:
+			traj_final_return = after_buy_balance # Already appended to traj_thin_list
 
-			parameters_list.append([sell_wait_days, sell_pct_change, sell_portfolio_pct, buy_wait_days, buy_pct_change, final_return])
-			sell_dates_list.append(sell_dates)
-			buy_dates_list.append(buy_dates)
+			# In the situation where the final buy is before the last date in the DJI, we need
+			# to calculate the growth that takes place from that buy to the last date. The if-statement
+			# below does this:
+			if buy_dates[-1] != second_to_last_date: # if the last buy_date doesn't equal 7-5-2021
+				traj_final_return = original_return * adjustment_factor
+				traj_thin_list.append([pd.Timestamp(last_date), traj_final_return])
+			
+			# Put traj_thin_list into a dataframe, specify index, convert to datetime:
+			df_single_traj_thin = pd.DataFrame(data=traj_thin_list, columns=['Date', n])
+			df_single_traj_thin.set_index('Date', inplace=True)
+			df_single_traj_thin.index = pd.to_datetime(df_single_traj_thin.index)
+			# print('df_single_traj_thin memory usage:\n', df_single_traj_thin.memory_usage())
+			# Put df_single_traj_thin into its own column in df_traj_thin, index aligned:
+			df_traj_thin = df_traj_thin.join(df_single_traj_thin, how='outer')
 
-			# Another way to calculate the final return: final_return = balance.iloc[-1]
+			parameters_list.append([sell_wait_days, sell_pct_change, sell_portfolio_pct, buy_wait_days, buy_pct_change, traj_final_return])
+			sell_dates_list.append([sell_dates])
+			buy_dates_list.append([buy_dates])
 
-	traj_arr = np.asarray(traj_list).T#.reshape((-1,3))
-	df_traj = pd.DataFrame(data=traj_arr, index=cumulative_pct_change.index)
-	original_balance.rename('Original Balance', inplace=True)
-	df_traj = df_traj.join(original_balance, how='outer')
+		# # Plot the current trajectory before the next iteration:
+		# plt.plot(df_traj_thin.interpolate(), color='orange', alpha=0.5) # Interpolating
+		# plt.plot(df_traj_thin, color='orange', alpha=0.5) # Not interpolating
+		# plt.plot(original_balance, color='blue', alpha=0.3)
+		# plt.show()
 
+	### Prepare to store trajectories and parameters: ###
+
+	# Prep the sparse trajectories:
+	df_traj_thin.sort_values(by=['2021-07-16'], axis=1, ascending=False, inplace=True) # Sort by the final balance on 7-16-2021
+	df_traj_thin = df_original_balance.join(df_traj_thin, how='outer')
+
+	# Plotting the top ten trajectories
+	n_trajs_to_plot = 10
+	df_traj_thin_selection = df_traj_thin.iloc[:, 0:n_trajs_to_plot]
+	fig, ax = plt.subplots(figsize=(9,10))
+	for col in df_traj_thin_selection.columns: # Many NaNs in each trajectory column so plotting each column separately with NaNs dropped to make for continuous line plots.
+		df_traj_thin[col].dropna().plot(use_index=True, ax=ax)
+	plt.show()
+
+	# Prep parameters:
 	df_parameters = pd.DataFrame(data=parameters_list, columns=['Sell Wait Days', 'Sell Pct','Sell Port Pct','Buy Wait Days','Buy Pct','Final Return'])
 	df_parameters.index.rename('Strategy', inplace=True)
-	df_parameters.sort_values(axis=0, by=['Final Return'], ascending=False, inplace=True)
+	df_parameters.sort_values(by=['Final Return'], axis=0, ascending=False, inplace=True)
 
+	# Prep sell dates:
 	df_sell_dates = pd.DataFrame(data=sell_dates_list, index=list(range(len(sell_dates_list)))).T
 
+	# Prep buy_dates:
 	df_buy_dates = pd.DataFrame(data=buy_dates_list, index=list(range(len(buy_dates_list)))).T
 
-	ser_final_returns = df_parameters['Final Return'].dropna()
+	# Calculating percent of all strategies that beat the original balance:
+	ser_final_returns = df_parameters['Final Return']
 	pct_winning = ser_final_returns[ser_final_returns > original_return].count() / ser_final_returns.count() * 100
 	print('Percent winning strategies: {}%'.format(pct_winning))
 
-	# DISPLAY ALL INVESTMENT STRATEGIES:
-	# df_traj.plot(use_index=True, linewidth=0.7)
-	# original_balance.plot(use_index=True, linewidth=3)
-	# plt.show()
-
-	### Display winning investment strategies ###
-	df_traj.sort_values(axis=1, by=[last_date], ascending=False, inplace=True)
-	df_traj.dropna(inplace=True)
-	print('df_traj sorted by highest final return:\n', df_traj.iloc[:,:30])#df_traj_sorted.loc[:,:'Original Balance'])
-	df_traj.iloc[:,:30].plot(use_index=True, linewidth=1)
-	original_balance.plot(use_index=True, linewidth=3)
-	plt.xlabel('Date')
-	plt.ylabel('Value, $')
-	plt.savefig(strategy+'_'+str(total_sims_to_run)+'_sims.png', bbox_inches='tight')
-	plt.show()
-
-	# Just verifying one last time that the original_balance is somewhere in df_traj
-	print('df_traj columns:\n', df_traj.columns.values.tolist()) # To verify original_balance is somewhere in here
-
 	# Pickle out the parameters and trajectories:
-	df_traj.to_pickle('trajectories_'+strategy+'_'+str(total_sims_to_run)+'_sims.pkl')
-	df_parameters.to_pickle('parameters_'+strategy+'_'+str(total_sims_to_run)+'_sims.pkl')
-	df_sell_dates.to_pickle('sell_dates_'+strategy+'_'+str(total_sims_to_run)+'_sims.pkl')
-	df_buy_dates.to_pickle('buy_dates_'+strategy+'_'+str(total_sims_to_run)+'_sims.pkl')
-
-
-	### Plot of something: ###
-	# df_all_trajs = pd.concat((original_balance, final_balance, trajectory), axis=1)
-	# df_all_trajs.rename(columns={0:'Original Balance', 1:'Final Balance', 2:'Trajectory'}, inplace=True)
-	# original_balance.plot(use_index=True)
-	# final_balance.plot(use_index=True)
-	# trajectory.plot(use_index=True, legend=True)
-	# df_all_trajs.plot(use_index=True)
-	# plt.show()
-
+	df_traj_thin.to_pickle('trajectories_'+strategy+'_thin_'+str(total_sims_to_run)+'_sims.pkl')
+	df_parameters.to_pickle('thin_parameters_'+strategy+'_thin_'+str(total_sims_to_run)+'_sims.pkl')
+	df_sell_dates.to_pickle('thin_sell_dates_'+strategy+'_thin_'+str(total_sims_to_run)+'_sims.pkl')
+	df_buy_dates.to_pickle('thin_buy_dates_'+strategy+'_thin_'+str(total_sims_to_run)+'_sims.pkl')
 
 	# Difficult to plot the buy-sell balance because it's a mess finding each
 	# buy and sell balance and extrapolating over the various periods between
@@ -2520,12 +2559,26 @@ def sell_up_3(stock_index, year, strategy, total_sims_to_run):
 # 	return
 
 
-def import_trajs(sell_up_simulations, sell_down_simulations, rolling_window):
-	df_traj_sell_up = pd.read_pickle('trajectories_sell_up_' + str(sell_up_simulations) + '_sims.pkl')
-	df_parameters_sell_up = pd.read_pickle('parameters_sell_up_' + str(sell_up_simulations) + '_sims.pkl')
-	df_sell_dates_sell_up = pd.read_pickle('sell_dates_sell_up_' + str(sell_up_simulations) + '_sims.pkl')
-	df_buy_dates_sell_up = pd.read_pickle('buy_dates_sell_up_' + str(sell_up_simulations) + '_sims.pkl')
+def import_trajs(sparse, sell_up_simulations, sell_down_simulations, rolling_window):
+	
+	### Importing sell_up and sell_down trajectories: ###
+	if sparse is True:
+		sparse_str = 'thin'
+	else:
+		sparse_str = ''
 
+	# Import sell_up:
+	df_traj_sell_up = pd.read_pickle('trajectories_sell_up_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_parameters_sell_up = pd.read_pickle('parameters_sell_up_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_sell_dates_sell_up = pd.read_pickle('sell_dates_sell_up_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_buy_dates_sell_up = pd.read_pickle('buy_dates_sell_up_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+
+	# Import sell_down:
+	df_traj_sell_down = pd.read_pickle('trajectories_sell_down_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_parameters_sell_down = pd.read_pickle('parameters_sell_down_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_sell_dates_sell_down = pd.read_pickle('sell_dates_sell_down_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	df_buy_dates_sell_down = pd.read_pickle('buy_dates_sell_down_' + sparse_str + str(sell_up_simulations) + '_sims.pkl')
+	
 	# Renaming the columns because they weren't correctly named, problem problem needs to be fixed in sell_up():
 	df_parameters_sell_up.rename(columns={'Sell Dec Pct':'Sell Inc Pct', 'Buy Inc Pct':'Buy Dec Pct'}, inplace=True)
 
@@ -3405,8 +3458,8 @@ def DJI_characterization(stock_index, year):
 ''' ------ Sell Up 3 - Monte Carlo for Trading Stocks ------- '''
 stock_index = 'DJI'
 year = 1914
-strategy = 'sell_up' # 'sell_up' or 'sell_down'
-total_sims_to_run = 1001
+strategy = 'sell_down' # 'sell_up' or 'sell_down'
+total_sims_to_run = 10000
 sell_up_3(stock_index, year, strategy, total_sims_to_run)
 ''' --------------------------------------------------------- '''
 
@@ -3427,10 +3480,11 @@ sell_up_3(stock_index, year, strategy, total_sims_to_run)
 
 
 ''' ------ Import Simulations ------ '''
-# sell_up_simulations = 50
-# sell_down_simulations = 50
+# sparse = True
+# sell_up_simulations = 100
+# sell_down_simulations = 100
 # rolling_window = 10
-# import_trajs(sell_up_simulations, sell_down_simulations, rolling_window)
+# import_trajs(sparse, sell_up_simulations, sell_down_simulations, rolling_window)
 ''' -------------------------------- '''
 
 
